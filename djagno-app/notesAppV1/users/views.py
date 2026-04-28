@@ -1,158 +1,314 @@
-import json
-from django.contrib.auth.models import User
-from rest_framework.views import APIView
-from django.contrib.auth.tokens import default_token_generator
-from django.utils.http import urlsafe_base64_encode
-from django.utils.encoding import force_bytes
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.utils.http import urlsafe_base64_decode
-from rest_framework.permissions import AllowAny,IsAuthenticated # Add this import
-from rest_framework.response import Response
-from django.contrib.auth.password_validation import validate_password
+import os
 
-class user_view(APIView):
-    # This line tells Django: "Don't ask for a token here!"
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+from django.conf import settings
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_bytes
+from django.contrib.auth.tokens import default_token_generator
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import AllowAny, IsAuthenticated
+
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+from rest_framework_simplejwt.exceptions import TokenError
+
+
+# ---------------------------------------------------------------------------
+# Cookie config — path must be set so delete_cookie matches set_cookie exactly
+# ---------------------------------------------------------------------------
+COOKIE_CONFIG = {
+    "key": "refresh_token",
+    "httponly": True,
+    "secure": True,        # ← was: not settings.DEBUG
+    "samesite": "None",    # ← was: "Lax"
+    "path": "/",
+    "max_age": 14 * 24 * 60 * 60,
+}
+def set_refresh_cookie(response, refresh_token_str):
+    """Set the refresh token HttpOnly cookie consistently."""
+    response.set_cookie(value=str(refresh_token_str), **COOKIE_CONFIG) #this is just giving the token the value + 
+    #addiong the cookie config 
+
+
+def delete_refresh_cookie(response):
+    """
+    This is subtle but important. delete_cookie works by setting the cookie with max_age=0, 
+    which tells the browser to expire it immediately. But browsers match cookies by name + path + domain + 
+    samesite together. If any of those don't match what was set originally, the browser sees it as a
+    different cookie and ignores the deletion. That's why we pass the same path and samesite — they must match exactly.
+    FIX 6: Delete the cookie with the exact same attributes it was set with.
+    Mismatched samesite/secure/path causes some browsers to silently ignore
+    the deletion.
+    """
+    response.delete_cookie(
+        "refresh_token",
+        path=COOKIE_CONFIG["path"],
+        samesite=COOKIE_CONFIG["samesite"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Register / Delete account
+# ---------------------------------------------------------------------------
+class RegisterView(APIView):
     permission_classes = [AllowAny]
 
-    def delete(self, request):
+    def post(self, request):
+        username = request.data.get("username", "").strip()
+        password = request.data.get("password", "")
+        email = request.data.get("email", "").strip()
+
+        if not username or not password:
+            return Response({"error": "Missing credentials"}, status=400)
+
+        if User.objects.filter(username=username).exists():
+            return Response({"error": "Username already exists"}, status=400)
+
+        if email and User.objects.filter(email=email).exists():
+            return Response({"error": "Email already exists"}, status=400)
+
+        # Validate password against Django's validators before creating the user
         try:
-            if request.user:
-                user = request.user
-                
-                # Soft Delete
-                user.is_active = False
-                user.save()
-                
-                return Response(status=204)
-            else :
-                return Response({"error":"No user is logged in "},status=401)
-        except:
-            return Response({"error":"Internal server error "},status=500)            
+            validate_password(password)
+        except ValidationError as e:
+            return Response({"error": e.messages}, status=400)
+
+        # FIX 7: No bare except — let specific errors surface cleanly
+        user = User.objects.create_user(username=username, password=password, email=email)
+        refresh = RefreshToken.for_user(user)
+
+        response = Response({
+            "user": {"user_id": user.id, "username": user.username},
+            "access": str(refresh.access_token),
+        }, status=201)
+        set_refresh_cookie(response, refresh)
+        return response
+
+    # FIX 1: Delete account must require authentication
+    def delete(self, request):
+        if not request.user.is_authenticated:
+            return Response({"error": "Authentication required"}, status=401)
+
+        # Soft-delete: deactivate instead of hard delete to preserve referential integrity
+        request.user.is_active = False
+        request.user.save()
+
+        # Also blacklist all outstanding tokens for this user
+        tokens = OutstandingToken.objects.filter(user=request.user)
+        for token in tokens:
+            BlacklistedToken.objects.get_or_create(token=token)
+
+        response = Response(status=204)
+        delete_refresh_cookie(response)
+        return response
+
+    # FIX 1 (continued): Override get_permissions so DELETE requires auth
+    def get_permissions(self):
+        if self.request.method == "DELETE":
+            return [IsAuthenticated()]
+        return [AllowAny()]
+
+
+# ---------------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------------
+class LoginView(APIView):
+    permission_classes = [AllowAny]
 
     def post(self, request):
+        username = request.data.get("username", "").strip()
+        password = request.data.get("password", "")
+
+        if not username or not password:
+            return Response({"error": "Missing credentials"}, status=400)
+
+        user = authenticate(username=username, password=password)
+
+        if not user:
+            # Same message for both "user not found" and "wrong password"
+            # to avoid username enumeration
+            return Response({"error": "Invalid credentials"}, status=401)
+
+        if not user.is_active:
+            return Response({"error": "Account is disabled"}, status=403)
+
+        refresh = RefreshToken.for_user(user)
+
+        response = Response({
+            "user": {"user_id": user.id, "username": user.username},
+            "access": str(refresh.access_token),
+        }, status=200)
+        set_refresh_cookie(response, refresh)
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Logout
+# ---------------------------------------------------------------------------
+class LogoutView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        refresh_token = request.COOKIES.get("refresh_token")
+
+        # FIX 4: Blacklist the token server-side so it can't be reused
+        # even if someone captured it before logout
+        if refresh_token:
+            try:
+                token = RefreshToken(refresh_token)
+                token.blacklist()
+            except TokenError:
+                # Already expired or invalid — that's fine, just clear the cookie
+                pass
+
+        response = Response({"message": "Logged out"}, status=200)
+        delete_refresh_cookie(response)
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Token refresh
+# ---------------------------------------------------------------------------
+class CustomTokenRefreshView(TokenRefreshView):
+
+    def post(self, request, *args, **kwargs):
+        refresh_token = request.COOKIES.get("refresh_token")
+
+        if not refresh_token:
+            return Response({"error": "No refresh token"}, status=401)
+
+        serializer = TokenRefreshSerializer(data={"refresh": refresh_token})
+
         try:
-            # 1. Parse the JSON body
-            data = request.data
-            username = data.get('username')
-            password = data.get('password')
-            email = data.get('email', '')
+            serializer.is_valid(raise_exception=True)
+        except TokenError:
+            return Response({"error": "Invalid or expired refresh token"}, status=401)
 
-            # 2. Basic Validation
-            if not username or not password:
-                return Response({"error": "Missing credentials"}, status=400)
+        data = serializer.validated_data  # "access", and "refresh" if ROTATE_REFRESH_TOKENS=True
 
-            if User.objects.filter(username=username).exists() or  User.objects.filter(email=email).exists():
-                return Response({"error": "User already exists"}, status=400)
+        response = Response({"access": data["access"]}, status=200)
 
-            # 3. Create the User (CRITICAL: use create_user for hashing)
-            user = User.objects.create_user(
-                username=username, 
-                password=password, 
-                email=email
-            )
+        # FIX 4 (continued): If ROTATE_REFRESH_TOKENS=True, push the new token into the cookie
+        if "refresh" in data:
+            set_refresh_cookie(response, data["refresh"])
 
-            # 4. Manually generate JWT Tokens
-            refresh = RefreshToken.for_user(user)
-            
-            # 5. Return the response
-            return Response({
-                "user": {
-                    "user_id": user.id,
-                    "username": user.username
-                },
-                "tokens": {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                }
-            }, status=201)
-
-        except json.JSONDecodeError:
-            return Response({"error": "Invalid JSON"}, status=400)
-        except Exception as e:
-            return Response({"error": str(e)}, status=500)
-        
+        return response
 
 
-
-
-
+# ---------------------------------------------------------------------------
+# Password reset — request
+# ---------------------------------------------------------------------------
 class RequestPasswordReset(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        email = request.data.get('email')
+        email = request.data.get("email", "").strip()
+        if not email:
+            return Response({"error": "Email is required"}, status=400)
+
         user = User.objects.filter(email=email).first()
-
-        if user:
-            # 1. Generate a unique token
+        if user and user.is_active:
             token = default_token_generator.make_token(user)
-            
-            # 2. Encode the user's ID (for security in the URL)
             uid = urlsafe_base64_encode(force_bytes(user.pk))
-            
-            # 3. Create the Reset Link
-            # In a real app, this link points to your FRONTEND (React/Vue/Mobile)
-            reset_link = f"https://yourfrontend.com/reset-password/{uid}/{token}/"
-            
-            # 4. Send Email (Standard Django way)
-            # send_mail("Password Reset", f"Click here: {reset_link}", "admin@app.com", [email])
-            
-            print(f"DEBUG: Reset link is {reset_link}") # For your testing
 
-        # For security, always return 200 even if the email doesn't exist
-        # This prevents hackers from "fishing" for valid emails.
-        return Response({"message": "If an account exists, a reset link has been sent."}, status=200)
-    
+            # FIX 2: Read frontend URL from env — never hardcode localhost
+            frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+            reset_link = f"{frontend_url}/reset-password/{uid}/{token}/"
 
+            # TODO: replace print() with your email backend (e.g. django.core.mail.send_mail)
+            # In production: send_mail("Reset your password", reset_link, settings.DEFAULT_FROM_EMAIL, [email])
+            print(f"[DEBUG] Reset link: {reset_link}")
+
+        # Always return the same response to prevent email enumeration
+        return Response(
+            {"message": "If an account exists, a reset link has been sent."},
+            status=200,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Password reset — confirm
+# ---------------------------------------------------------------------------
 class PasswordResetConfirm(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        uidb64 = request.data.get('uid')
-        token = request.data.get('token')
-        new_password = request.data.get('new_password')
+        uidb64 = request.data.get("uid", "")
+        token = request.data.get("token", "")
+        new_password = request.data.get("new_password", "")
+
+        if not uidb64 or not token or not new_password:
+            return Response({"error": "Missing fields"}, status=400)
 
         try:
-            # 1. Decode the user ID
             uid = urlsafe_base64_decode(uidb64).decode()
             user = User.objects.get(pk=uid)
-            
-            # 2. Verify the token is valid for THIS user
-            if default_token_generator.check_token(user, token):
-                # 3. Set the new password (hashing it automatically!)
-                user.set_password(new_password)
-                user.save()
-                return Response({"message": "Password reset successful"}, status=200)
-            else:
-                return Response({"error": "Invalid or expired token"}, status=400)
-                
-        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
-            return Response({"error": "Invalid data"}, status=400)
-    
+        except (User.DoesNotExist, ValueError, TypeError):
+            return Response({"error": "Invalid link"}, status=400)
+
+        if not default_token_generator.check_token(user, token):
+            return Response({"error": "Invalid or expired token"}, status=400)
+
+        # FIX 3: Validate the new password before accepting it
+        try:
+            validate_password(new_password, user)
+        except ValidationError as e:
+            return Response({"error": e.messages}, status=400)
+
+        user.set_password(new_password)
+        user.save()
+
+        # Blacklist all existing tokens so old sessions can't persist after a reset
+        tokens = OutstandingToken.objects.filter(user=user)
+        for t in tokens:
+            BlacklistedToken.objects.get_or_create(token=t)
+
+        return Response({"message": "Password reset successful"}, status=200)
 
 
-
+# ---------------------------------------------------------------------------
+# Change password (authenticated)
+# ---------------------------------------------------------------------------
 class ChangePasswordView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         user = request.user
-        old_password = request.data.get("old_password")
-        new_password = request.data.get("new_password")
+        old_password = request.data.get("old_password", "")
+        new_password = request.data.get("new_password", "")
 
-        # 1. Verify the old password
+        if not old_password or not new_password:
+            return Response({"error": "Missing fields"}, status=400)
+
         if not user.check_password(old_password):
             return Response({"error": "Old password is incorrect"}, status=400)
 
-        # 2. Validate the new password (checks length, commonality, etc.)
         try:
             validate_password(new_password, user)
-        except Exception as e:
-            return Response({"error": list(e.messages)}, status=400)
+        except ValidationError as e:
+            return Response({"error": e.messages}, status=400)
 
-        # 3. Save the new password (this hashes it!)
         user.set_password(new_password)
         user.save()
 
-        # 4. Success
-        return Response({"message": "Password updated successfully"}, status=200)
+        # FIX 5: Blacklist all existing refresh tokens after password change
+        # so other active sessions (e.g. another device) are forced to re-login
+        tokens = OutstandingToken.objects.filter(user=user)
+        for t in tokens:
+            BlacklistedToken.objects.get_or_create(token=t)
+
+        # Issue fresh tokens for the current session
+        refresh = RefreshToken.for_user(user)
+        response = Response({
+            "message": "Password updated successfully",
+            "access": str(refresh.access_token),
+        }, status=200)
+        set_refresh_cookie(response, refresh)
+        return response
