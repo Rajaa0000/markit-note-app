@@ -1,5 +1,9 @@
 # markIT - Full-Stack Notes and Task Manager
 
+##  Live Demo
+
+You can view the live application here: [markit-note-app.vercel.app](https://markit-note-app.vercel.app/)
+
 markIT is a full-stack productivity application for creating notes, organizing task lists, and managing a focused personal workspace. The project combines a Django REST API with JWT authentication and a polished Next.js frontend.
 
 The application supports account creation, login, persistent sessions, note management, pinned notes, pastel note colors, task lists, task completion, list dates, search, password management, and account deletion.
