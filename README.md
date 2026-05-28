@@ -1,6 +1,5 @@
 # markIT - Full-Stack Notes and Task Manager
 
-##  Live Demo
 
 markIT is a full-stack productivity application for creating notes, organizing task lists, and managing a focused personal workspace. The project combines a Django REST API with JWT authentication and a polished Next.js frontend.
 
@@ -106,6 +105,9 @@ The main hub of the application, displaying a responsive split-view system:
 
 ---
 
+#### Settings Workspace
+<img src="./app_images/settings_dashboard_section.png" alt="Settings Panel" width="700" />
+
 ###  Core Features
 
 #### Notes Management
@@ -116,16 +118,11 @@ Features include layout pinning, custom color background tagging, and seamless c
 Built-in nested task architecture to track milestones, check list progression, and manage dates.
 <img src="./app_images/task_dashboard_section.png" alt="Task Workspace" width="700" />
 
----
-
-###  Workspace & Features Control
-Manage deep system configurations and toggle application settings on the fly.
-
 #### Features Section Breakdown
 <img src="./app_images/app_features_section.png" alt="App Features Panel" width="700" />
+---
 
-#### Settings Workspace
-<img src="./app_images/settings_dashboard_section.png" alt="Settings Panel" width="700" />
+
 
 ## Frontend Setup
 
