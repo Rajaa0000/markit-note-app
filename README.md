@@ -2,8 +2,6 @@
 
 ##  Live Demo
 
-You can view the live application here: [markit-note-app.vercel.app](https://markit-note-app.vercel.app/)
-
 markIT is a full-stack productivity application for creating notes, organizing task lists, and managing a focused personal workspace. The project combines a Django REST API with JWT authentication and a polished Next.js frontend.
 
 The application supports account creation, login, persistent sessions, note management, pinned notes, pastel note colors, task lists, task completion, list dates, search, password management, and account deletion.
@@ -91,6 +89,43 @@ notesApp/
 - Mark tasks complete or incomplete
 - Delete tasks
 - Search lists and tasks on the frontend
+
+##  Visual Walkthrough
+
+### Authentication
+Here is a look at the clean user onboarding experience:
+
+<img src="./app_images/sign_in_page.png" alt="markIT Sign In Page" width="700" />
+
+---
+
+###  Dashboard Overview
+The main hub of the application, displaying a responsive split-view system:
+
+<img src="./app_images/app_main_section.png" alt="markIT Main Section" width="700" />
+
+---
+
+###  Core Features
+
+#### Notes Management
+Features include layout pinning, custom color background tagging, and seamless categorization.
+<img src="./app_images/notes_dashboard_section.png" alt="Notes Workspace" width="700" />
+
+#### Task & Deadlines Tracker
+Built-in nested task architecture to track milestones, check list progression, and manage dates.
+<img src="./app_images/task_dashboard_section.png" alt="Task Workspace" width="700" />
+
+---
+
+###  Workspace & Features Control
+Manage deep system configurations and toggle application settings on the fly.
+
+#### Features Section Breakdown
+<img src="./app_images/app_features_section.png" alt="App Features Panel" width="700" />
+
+#### Settings Workspace
+<img src="./app_images/settings_dashboard_section.png" alt="Settings Panel" width="700" />
 
 ## Frontend Setup
 
