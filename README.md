@@ -8,8 +8,8 @@ The application supports account creation, login, persistent sessions, note mana
 
 - Full-stack architecture with a separate frontend and backend
 - JWT authentication with short-lived access tokens and HttpOnly refresh cookies
-- Silent session restore when the user returns to the app
 - Notes CRUD with pinning, colors, search, soft delete, and ownership protection
+- The usage of cursor pagination for sending the notes and the tasks lists
 - Task-list CRUD with nested tasks, task completion, editable list titles, and list dates
 - Password reset, password change, logout, and account deletion flows
 - Clean dashboard UI with protected routes, loading states, and error boundaries
